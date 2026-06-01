@@ -1,0 +1,234 @@
+The Goal:
+Build desktop app that:
+
+- Uploads PDF
+- Compresses PDF
+- Downloads compressed PDF
+- Runs locally
+
+
+-- Compresses PDF(WORKED ON COLAB)
+1) Why black rectangles happened in your code
+
+In your old pipeline you did:
+
+extract_image(xref) → bytes
+PIL.Image.open(...).convert("RGB") → drops alpha / masks
+save as JPEG
+doc.update_stream(xref, jpeg_bytes) → replaces only the raw stream
+
+That last step is the killer: update_stream() is a low-level tool that writes bytes back to the stream but does not automatically update the PDF image object dictionary (filters, color space, mask references, SMask, etc.). PyMuPDF explicitly documents update_stream() as a low-level stream writeback tool.
+
+So if the original image had things like:
+
+/SMask (soft mask / transparency)
+/Mask
+indexed / ICCBased colorspaces
+
+…then after you overwrite the stream with a JPEG, the PDF still “thinks” the image has those original properties → many viewers render it as black boxes. This is the same family of transparency/mask issues people hit when extracting or reusing PDF images improperly.
+
+✅ The fix is: don’t overwrite image streams blindly. Use PDF-aware replacement APIs, especially Page.replace_image().
+
+2) Architecture for a safe Colab pipeline
+
+Goal: Preserve text/layout, fix images, compress safely.
+
+Pipeline:
+
+Upload PDF (Colab widget)
+Choose level (Best / Balanced / Smallest)
+For each page:
+list images (page.get_images(full=True))
+for each image xref:
+detect mask/alpha risk (/SMask, /Mask, pixmap alpha)
+if alpha/mask → recompress as PNG (preserves transparency)
+else → recompress as JPEG (smaller)
+replace via page.replace_image(xref, stream=...)
+Save optimized PDF (garbage=4, deflate=True, clean=True)
+Download
+
+This keeps text searchable and avoids rasterizing pages.
+
+3) Library choices (and tradeoffs)
+PyMuPDF (fitz): fast PDF parsing + proper image replacement (Page.replace_image)
+Pillow: resize + encode PNG/JPEG reliably
+psutil (optional): memory logging (helps with large PDFs)
+
+Tradeoff: this focuses on safe image optimization. It won’t magically “optimize fonts perfectly” for every PDF, but it avoids breaking content.
+
+✅ WORKING Google Colab Notebook Code (paste into Colab)
+Cell 1 — Install
+!pip -q install pymupdf pillow psutil
+Cell 2 — Imports
+import fitz  # PyMuPDF
+import io
+import os
+import gc
+import psutil
+
+from PIL import Image
+from google.colab import files
+Cell 3 — Compression levels
+COMPRESSION_LEVELS = {
+    "1": {"name": "Best Quality",   "scale": 1.0,  "jpeg_quality": 90},
+    "2": {"name": "Balanced",       "scale": 0.75, "jpeg_quality": 75},
+    "3": {"name": "Smallest Size",  "scale": 0.5,  "jpeg_quality": 55},
+}
+Cell 4 — Helpers
+def log_memory(prefix=""):
+    mem = psutil.virtual_memory()
+    print(f"{prefix} RAM: {mem.percent}% used")
+
+def validate_pdf(path: str):
+    if not os.path.exists(path):
+        raise FileNotFoundError("PDF file not found.")
+    if os.path.getsize(path) == 0:
+        raise ValueError("Uploaded PDF is empty.")
+
+def output_name(input_path: str) -> str:
+    base = os.path.basename(input_path)
+    if base.lower().endswith(".pdf"):
+        base = base[:-4]
+    return f"{base}_compressed.pdf"
+
+def xref_has_mask(doc: fitz.Document, xref: int) -> bool:
+    """
+    Detect common transparency/mask indicators in the PDF image object dictionary.
+    This is a heuristic, but very effective for avoiding black-rectangle corruption.
+    """
+    try:
+        obj = doc.xref_object(xref, compressed=False)  # PDF dict as text
+        return ("/SMask" in obj) or ("/Mask" in obj)
+    except Exception:
+        return False
+
+def pil_from_pixmap(pix: fitz.Pixmap) -> Image.Image:
+    """
+    Convert PyMuPDF Pixmap to PIL Image.
+    """
+    mode = "RGBA" if pix.alpha else "RGB"
+    return Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+
+def encode_image(img: Image.Image, force_png: bool, jpeg_quality: int) -> bytes:
+    """
+    Encode PIL image to PNG (for alpha/mask safety) or JPEG (smaller for opaque).
+    """
+    buf = io.BytesIO()
+    if force_png:
+        img.save(buf, format="PNG", optimize=True)
+    else:
+        img = img.convert("RGB")  # JPEG cannot store alpha
+        img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+    return buf.getvalue()
+
+def resize_if_needed(img: Image.Image, scale: float) -> Image.Image:
+    """
+    Downscale image to reduce size. Keeps readability by using LANCZOS.
+    """
+    if scale >= 1.0:
+        return img
+    new_w = max(1, int(img.size[0] * scale))
+    new_h = max(1, int(img.size[1] * scale))
+    return img.resize((new_w, new_h), Image.LANCZOS)
+Cell 5 — Main compressor (safe image replacement)
+def compress_pdf_safe(input_pdf: str, output_pdf: str, level_key: str):
+    """
+    Compress images safely while preserving text/layout.
+    Uses Page.replace_image (PDF-aware) instead of blind stream overwrite.
+    """
+    validate_pdf(input_pdf)
+
+    cfg = COMPRESSION_LEVELS[level_key]
+    scale = cfg["scale"]
+    jpeg_q = cfg["jpeg_quality"]
+
+    print(f"Opening PDF: {input_pdf}")
+    doc = fitz.open(input_pdf)
+
+    if doc.needs_pass:
+        # Can't process unless you supply password; avoid corrupt output.
+        raise RuntimeError("This PDF is password-protected / encrypted.")
+
+    replaced = 0
+    skipped = 0
+
+    for pno in range(len(doc)):
+        page = doc[pno]
+        images = page.get_images(full=True)
+
+        print(f"Page {pno+1}/{len(doc)} — images found: {len(images)}")
+
+        seen = set()  # avoid duplicate xref replacement on same page
+
+        for info in images:
+            xref = info[0]
+            if xref in seen:
+                continue
+            seen.add(xref)
+
+            try:
+                # Build pixmap from the embedded image
+                pix = fitz.Pixmap(doc, xref)
+
+                # Convert unusual colorspaces safely to RGB for PIL.
+                # If pix.n is high (CMYK etc.), convert.
+                if pix.n >= 5 and not pix.alpha:
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+
+                # Detect risk: alpha channel or mask/softmask present
+                risky = pix.alpha or xref_has_mask(doc, xref)
+
+                # Convert to PIL
+                img = pil_from_pixmap(pix)
+
+                # Downscale according to level
+                img = resize_if_needed(img, scale=scale)
+
+                # Encode: PNG for risky, JPEG for opaque
+                data = encode_image(img, force_png=risky, jpeg_quality=jpeg_q)
+
+                # Replace using PDF-aware API (avoids black rectangles)
+                page.replace_image(xref, stream=data)
+
+                replaced += 1
+
+            except Exception as e:
+                skipped += 1
+                print(f"  - Skipped image xref={xref}: {e}")
+
+            finally:
+                # help memory on big PDFs
+                gc.collect()
+
+        log_memory(prefix="After page")
+
+    print("Saving optimized PDF...")
+    doc.save(output_pdf, garbage=4, deflate=True, clean=True)
+    doc.close()
+
+    print(f"Done. Images replaced: {replaced}, skipped: {skipped}")
+Cell 6 — Upload + Run + Download
+print("Upload your PDF:")
+uploaded = files.upload()
+input_pdf = list(uploaded.keys())[0]
+
+print("\nCompression levels:")
+print("1 -> Best Quality")
+print("2 -> Balanced")
+print("3 -> Smallest Size")
+
+choice = input("Select level (1/2/3): ").strip()
+if choice not in COMPRESSION_LEVELS:
+    raise ValueError("Invalid choice. Please select 1, 2, or 3.")
+
+print("Selected:", COMPRESSION_LEVELS[choice]["name"])
+
+out_pdf = output_name(input_pdf)
+
+try:
+    compress_pdf_safe(input_pdf, out_pdf, choice)
+    files.download(out_pdf)
+
+except Exception as e:
+    print("\n❌ Compression failed:")
+    print(e)
