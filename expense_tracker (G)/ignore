@@ -1,0 +1,3 @@
+to run in terminal:1)wsl
+2) cd "/mnt/c/Agentc workflow/DS TRY/Expense_tracker/expense_tracker" && streamlit run app.py  
+
