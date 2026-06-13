@@ -41,11 +41,19 @@ streamlit run app.py
 
 ## Screenshots
 
-Add screenshots of:
+screenshots of:
 
 * Topic Selection Page
+  <img width="1332" height="586" alt="image" src="https://github.com/user-attachments/assets/e7348cb6-5c28-434b-850a-e73e273fe331" />
+
 * Quiz Page
+  <img width="1127" height="737" alt="image" src="https://github.com/user-attachments/assets/7c070198-c3e0-4e6c-bbed-26f8b4eff1d0" />
+
 * Results Page
+<img width="546" height="737" alt="image" src="https://github.com/user-attachments/assets/8a45c042-a9b6-42b7-9118-a78525b4b76d" />
+<img width="572" height="742" alt="image" src="https://github.com/user-attachments/assets/2f354c2a-e6d0-40fd-a32d-85c21603b329" />
+<img width="557" height="737" alt="image" src="https://github.com/user-attachments/assets/89633cf2-172d-47f5-be19-381277719c5f" />
+
 
 ## Project Structure
 
