@@ -40,7 +40,8 @@ Calculator_with_GUI/
 
 ## Screenshots
 
-Add screenshots of the calculator app here.
+<img width="505" height="778" alt="image" src="https://github.com/user-attachments/assets/d4992c42-879d-4e8b-ac6d-6ad3a4ac440f" />
+
 
 ## Notes
 
