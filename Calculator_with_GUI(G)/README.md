@@ -40,7 +40,8 @@ Calculator_with_GUI/
 
 ## Screenshots
 
-<img width="505" height="778" alt="image" src="https://github.com/user-attachments/assets/d4992c42-879d-4e8b-ac6d-6ad3a4ac440f" />
+<img width="487" height="772" alt="image" src="https://github.com/user-attachments/assets/d4d2b245-cfba-4c59-accb-facca7154541" />
+
 
 
 ## Notes
